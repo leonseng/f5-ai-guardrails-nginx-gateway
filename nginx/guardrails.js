@@ -2,35 +2,27 @@
 // Handles POST /v1/chat/completions only. Non-streaming requests only.
 // Guardrails calls are made via NJS ngx.fetch() (available in the http module context).
 
+import helpers from './helpers.js';
+
 // ---------------------------------------------------------------------------
-// Scan the last user message in `messages` against F5 AI Guardrails.
-// Returns { blocked: bool, reason: string }
+// POST text to F5 AI Guardrails for scanning, applying failOpen to errors.
+// Returns { pass: true } to continue, or { pass: false } when a response has
+// already been sent (blocked or unrecoverable infrastructure error).
+// blockedCode: 'prompt_blocked' | 'response_blocked'
 // Outcome mapping: "flagged" → blocked; "cleared" | "redacted" → pass.
 // ---------------------------------------------------------------------------
-async function scanWithGuardrails(r, messages) {
-    let lastUser;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-            lastUser = messages[i];
-            break;
-        }
-    }
-    const inputText = lastUser
-        ? lastUser.content
-        : messages.map(m => m.content).join('\n');
-
+async function scanWithGuardrails(r, text, failOpen, blockedCode) {
     const debug = process.env.DEBUG === 'true';
-    const failOpen = process.env.F5_AI_GUARDRAILS_FAIL_OPEN === 'true';
     const scanUrl = `${process.env.F5_AI_GUARDRAILS_API_URL.replace(/\/$/, '')}/scans`;
 
     const payload = JSON.stringify({
-        input: inputText,
+        input: text,
         project: process.env.F5_AI_GUARDRAILS_PROJECT_ID,
         verbose: false
     });
 
     if (debug) {
-        r.warn(`[guardrails] scan → POST ${scanUrl} (input: ${inputText.length} chars)`);
+        r.warn(`[guardrails] scan → POST ${scanUrl} (input: ${text.length} chars)`);
     }
 
     const t0 = Date.now();
@@ -43,15 +35,15 @@ async function scanWithGuardrails(r, messages) {
                 'Content-Type': 'application/json'
             },
             body: payload
-        }
-        );
+        });
     } catch (e) {
         r.error(`[guardrails] fetch error: ${e}`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_unreachable — passing through`);
-            return { blocked: false, reason: 'fail_open' };
+            return { pass: true };
         }
-        return { blocked: true, reason: 'guardrails_unreachable' };
+        helpers.blockResponse(r, 'guardrails_unreachable', 'Guardrails scan error: guardrails_unreachable');
+        return { pass: false };
     }
 
     if (debug) {
@@ -59,13 +51,14 @@ async function scanWithGuardrails(r, messages) {
     }
 
     if (!scanResp.ok) {
-        const text = await scanResp.text().catch(() => '');
-        r.error(`[guardrails] scan returned HTTP ${scanResp.status}: ${text}`);
+        const body = await scanResp.text().catch(() => '');
+        r.error(`[guardrails] scan returned HTTP ${scanResp.status}: ${body}`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_api_error — passing through`);
-            return { blocked: false, reason: 'fail_open' };
+            return { pass: true };
         }
-        return { blocked: true, reason: 'guardrails_api_error' };
+        helpers.blockResponse(r, 'guardrails_api_error', 'Guardrails scan error: guardrails_api_error');
+        return { pass: false };
     }
 
     let result;
@@ -75,13 +68,13 @@ async function scanWithGuardrails(r, messages) {
         r.error(`[guardrails] failed to parse scan response`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_parse_error — passing through`);
-            return { blocked: false, reason: 'fail_open' };
+            return { pass: true };
         }
-        return { blocked: true, reason: 'guardrails_parse_error' };
+        helpers.blockResponse(r, 'guardrails_parse_error', 'Guardrails scan error: guardrails_parse_error');
+        return { pass: false };
     }
 
     const outcome = result && result.result && result.result.outcome;  // "cleared" | "flagged" | "redacted"
-    const blocked = outcome === 'flagged';
 
     if (debug) {
         const policy = (result && result.result && result.result.policy) || '';
@@ -89,21 +82,13 @@ async function scanWithGuardrails(r, messages) {
         r.warn(`[guardrails] outcome=${outcome}  policy=${policy}  reason=${reason}`);
     }
 
-    return { blocked, reason: outcome || '' };
-}
+    if (outcome === 'flagged') {
+        const label = blockedCode === 'prompt_blocked' ? 'Prompt' : 'Response';
+        helpers.blockResponse(r, blockedCode, `${label} blocked by AI Guardrails: ${outcome}`);
+        return { pass: false };
+    }
 
-// ---------------------------------------------------------------------------
-// Build a standardised HTTP 400 JSON error body.
-// ---------------------------------------------------------------------------
-function blockResponse(r, code, message) {
-    r.headersOut['Content-Type'] = 'application/json';
-    r.return(400, JSON.stringify({
-        error: {
-            message: message || 'Blocked by AI Guardrails',
-            type: 'guardrails_block',
-            code: code
-        }
-    }));
+    return { pass: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +104,7 @@ function blockResponse(r, code, message) {
 async function handleChatCompletions(r) {
     const scanPrompt = process.env.F5_AI_GUARDRAILS_SCAN_PROMPT === 'true';
     const scanResponse = process.env.F5_AI_GUARDRAILS_SCAN_RESPONSE === 'true';
+    const failOpen = process.env.F5_AI_GUARDRAILS_FAIL_OPEN === 'true';
 
     // 1. Parse request body.
     let reqBody;
@@ -163,15 +149,21 @@ async function handleChatCompletions(r) {
             return;
         }
 
-        const scan = await scanWithGuardrails(r, reqBody.messages);
-        if (scan.blocked) {
-            const apiErrors = ['guardrails_unreachable', 'guardrails_api_error', 'guardrails_parse_error'];
-            if (apiErrors.includes(scan.reason)) {
-                blockResponse(r, scan.reason, `Guardrails scan error: ${scan.reason}`);
+        let promptText;
+        try {
+            promptText = helpers.extractRequestScanText(reqBody.messages);
+        } catch (e) {
+            if (failOpen) {
+                r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
             } else {
-                blockResponse(r, 'prompt_blocked', `Prompt blocked by AI Guardrails: ${scan.reason}`);
+                helpers.blockResponse(r, e.code, e.message);
+                return;
             }
-            return;
+        }
+
+        if (promptText) {
+            const result = await scanWithGuardrails(r, promptText, failOpen, 'prompt_blocked');
+            if (!result.pass) return;
         }
     }
 
@@ -215,22 +207,21 @@ async function handleChatCompletions(r) {
             return;
         }
 
-        const choices = respBody.choices || [];
-        const assistantMessages = choices
-            .filter(c => c.message && c.message.content)
-            .map(c => ({ role: 'assistant', content: c.message.content }));
-
-        if (assistantMessages.length > 0) {
-            const scan = await scanWithGuardrails(r, assistantMessages);
-            if (scan.blocked) {
-                const apiErrors = ['guardrails_unreachable', 'guardrails_api_error', 'guardrails_parse_error'];
-                if (apiErrors.includes(scan.reason)) {
-                    blockResponse(r, scan.reason, `Guardrails scan error: ${scan.reason}`);
-                } else {
-                    blockResponse(r, 'response_blocked', `Response blocked by AI Guardrails: ${scan.reason}`);
-                }
+        let responseText;
+        try {
+            responseText = helpers.extractResponseScanText(respBody.choices || []);
+        } catch (e) {
+            if (failOpen) {
+                r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
+            } else {
+                helpers.blockResponse(r, e.code, e.message);
                 return;
             }
+        }
+
+        if (responseText) {
+            const result = await scanWithGuardrails(r, responseText, failOpen, 'response_blocked');
+            if (!result.pass) return;
         }
     }
 
