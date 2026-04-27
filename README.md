@@ -117,6 +117,7 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `F5_AI_GUARDRAILS_PROJECT_ID` | ✅ | — | CalypsoAI project ID to scan against |
 | `F5_AI_GUARDRAILS_SCAN_PROMPT` | | `true` | Set to `false` to disable prompt scanning |
 | `F5_AI_GUARDRAILS_SCAN_RESPONSE` | | `true` | Set to `false` to disable response scanning |
+| `F5_AI_GUARDRAILS_FAIL_OPEN` | | `false` | Set to `true` to pass requests through to upstream when the guardrails scan API returns any error (network failure, non-2xx, or unparseable response). When `false` (default), scan errors block the request with HTTP 400. |
 | `DEBUG` | | `false` | Set to `true` to log guardrails scan outcomes to the nginx error log |
 
 ## Request behaviour
@@ -156,6 +157,11 @@ All errors are returned as JSON matching the OpenAI error shape:
 | Guardrails unreachable | 400 | `guardrails_unreachable` |
 | Guardrails API error | 400 | `guardrails_api_error` |
 | Upstream LLM error | 502 | `bad_gateway` |
+
+> **Fail-open mode** — when `F5_AI_GUARDRAILS_FAIL_OPEN=true`, the three guardrails error scenarios above (`guardrails_unreachable`, `guardrails_api_error`, and unparseable responses) are treated as pass-through instead of blocking. A `warn`-level log line is always emitted so the degraded operation is visible:
+> ```
+> [guardrails] scan error (fail-open): guardrails_api_error — passing through
+> ```
 
 ## Limitations
 

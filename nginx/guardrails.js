@@ -20,6 +20,7 @@ async function scanWithGuardrails(r, messages) {
         : messages.map(m => m.content).join('\n');
 
     const debug = process.env.DEBUG === 'true';
+    const failOpen = process.env.F5_AI_GUARDRAILS_FAIL_OPEN === 'true';
     const scanUrl = `${process.env.F5_AI_GUARDRAILS_API_URL.replace(/\/$/, '')}/scans`;
 
     const payload = JSON.stringify({
@@ -46,6 +47,10 @@ async function scanWithGuardrails(r, messages) {
         );
     } catch (e) {
         r.error(`[guardrails] fetch error: ${e}`);
+        if (failOpen) {
+            r.warn(`[guardrails] scan error (fail-open): guardrails_unreachable — passing through`);
+            return { blocked: false, reason: 'fail_open' };
+        }
         return { blocked: true, reason: 'guardrails_unreachable' };
     }
 
@@ -56,6 +61,10 @@ async function scanWithGuardrails(r, messages) {
     if (!scanResp.ok) {
         const text = await scanResp.text().catch(() => '');
         r.error(`[guardrails] scan returned HTTP ${scanResp.status}: ${text}`);
+        if (failOpen) {
+            r.warn(`[guardrails] scan error (fail-open): guardrails_api_error — passing through`);
+            return { blocked: false, reason: 'fail_open' };
+        }
         return { blocked: true, reason: 'guardrails_api_error' };
     }
 
@@ -64,6 +73,10 @@ async function scanWithGuardrails(r, messages) {
         result = await scanResp.json();
     } catch (e) {
         r.error(`[guardrails] failed to parse scan response`);
+        if (failOpen) {
+            r.warn(`[guardrails] scan error (fail-open): guardrails_parse_error — passing through`);
+            return { blocked: false, reason: 'fail_open' };
+        }
         return { blocked: true, reason: 'guardrails_parse_error' };
     }
 
@@ -152,7 +165,12 @@ async function handleChatCompletions(r) {
 
         const scan = await scanWithGuardrails(r, reqBody.messages);
         if (scan.blocked) {
-            blockResponse(r, 'prompt_blocked', `Prompt blocked by AI Guardrails: ${scan.reason}`);
+            const apiErrors = ['guardrails_unreachable', 'guardrails_api_error', 'guardrails_parse_error'];
+            if (apiErrors.includes(scan.reason)) {
+                blockResponse(r, scan.reason, `Guardrails scan error: ${scan.reason}`);
+            } else {
+                blockResponse(r, 'prompt_blocked', `Prompt blocked by AI Guardrails: ${scan.reason}`);
+            }
             return;
         }
     }
@@ -205,7 +223,12 @@ async function handleChatCompletions(r) {
         if (assistantMessages.length > 0) {
             const scan = await scanWithGuardrails(r, assistantMessages);
             if (scan.blocked) {
-                blockResponse(r, 'response_blocked', `Response blocked by AI Guardrails: ${scan.reason}`);
+                const apiErrors = ['guardrails_unreachable', 'guardrails_api_error', 'guardrails_parse_error'];
+                if (apiErrors.includes(scan.reason)) {
+                    blockResponse(r, scan.reason, `Guardrails scan error: ${scan.reason}`);
+                } else {
+                    blockResponse(r, 'response_blocked', `Response blocked by AI Guardrails: ${scan.reason}`);
+                }
                 return;
             }
         }
