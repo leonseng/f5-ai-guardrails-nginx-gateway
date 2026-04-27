@@ -1,5 +1,5 @@
 // guardrails.js — NJS module for F5 AI Guardrails sideband scanning.
-// Handles POST /v1/chat/completions only. Non-streaming requests only.
+// Handles POST /v1/chat/completions. Supports both streaming and non-streaming.
 // Guardrails calls are made via NJS ngx.fetch() (available in the http module context).
 
 import helpers from './helpers.js';
@@ -100,11 +100,8 @@ async function scanWithGuardrails(r, text, failOpen, blockedCode) {
 // Main handler: js_content for POST /v1/chat/completions.
 // Flow:
 //   1. Parse and validate request body.
-//   2. Reject streaming (not supported).
-//   3. Scan prompt if F5_AI_GUARDRAILS_SCAN_PROMPT=true.
-//   4. Forward to upstream LLM via subrequest to /app/.
-//   5. Scan response if F5_AI_GUARDRAILS_SCAN_RESPONSE=true.
-//   6. Return upstream response to client.
+//   2. Scan prompt if F5_AI_GUARDRAILS_SCAN_PROMPT=true.
+//   3. Delegate to handleStreamingRequest or handleNonStreamingRequest.
 // ---------------------------------------------------------------------------
 async function handleChatCompletions(r) {
     const scanPrompt = process.env.F5_AI_GUARDRAILS_SCAN_PROMPT === 'true';
@@ -113,7 +110,6 @@ async function handleChatCompletions(r) {
     const redactPrompt   = process.env.F5_AI_GUARDRAILS_REDACT_PROMPT   === 'true';
     const redactResponse = process.env.F5_AI_GUARDRAILS_REDACT_RESPONSE === 'true';
 
-    // 1. Parse request body.
     let reqBody;
     try {
         reqBody = JSON.parse(r.requestText);
@@ -129,20 +125,6 @@ async function handleChatCompletions(r) {
         return;
     }
 
-    // 2. Reject streaming — not supported.
-    if (reqBody.stream === true) {
-        r.headersOut['Content-Type'] = 'application/json';
-        r.return(400, JSON.stringify({
-            error: {
-                message: 'Streaming is not supported by this proxy',
-                type: 'invalid_request_error',
-                code: 'streaming_not_supported'
-            }
-        }));
-        return;
-    }
-
-    // 3. Scan prompt.
     if (scanPrompt) {
         if (!Array.isArray(reqBody.messages) || reqBody.messages.length === 0) {
             r.headersOut['Content-Type'] = 'application/json';
@@ -188,7 +170,19 @@ async function handleChatCompletions(r) {
         }
     }
 
-    // 4. Forward to upstream LLM.
+    if (reqBody.stream === true) {
+        await handleStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse);
+    } else {
+        await handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse);
+    }
+}
+
+export default { handleChatCompletions, getOpenaiUrl, getOpenaiKey };
+
+// ---------------------------------------------------------------------------
+// Non-streaming path: subrequest to upstream, scan JSON response, return to client.
+// ---------------------------------------------------------------------------
+async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
     let upstreamReply;
     try {
         upstreamReply = await r.subrequest('/app/', {
@@ -215,7 +209,6 @@ async function handleChatCompletions(r) {
         return;
     }
 
-    // 5. Scan response.
     if (scanResponse) {
         let respBody;
         try {
@@ -263,13 +256,72 @@ async function handleChatCompletions(r) {
         }
     }
 
-    // 6. Pass clean upstream response to client.
     r.headersOut['Content-Type'] =
         upstreamReply.headersOut['Content-Type'] || 'application/json';
     r.return(200, upstreamReply.responseText);
 }
 
-export default { handleChatCompletions, getOpenaiUrl, getOpenaiKey };
+// ---------------------------------------------------------------------------
+// Streaming path: subrequest to upstream, scan buffered SSE, replay to client.
+// ---------------------------------------------------------------------------
+async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
+    let upstreamReply;
+    try {
+        upstreamReply = await r.subrequest('/app/', {
+            method: r.method,
+            body: JSON.stringify(reqBody)
+        });
+    } catch (e) {
+        r.error(`[guardrails] upstream subrequest error: ${e}`);
+        helpers.sendStreamError(r, 'bad_gateway', 'Upstream LLM request failed');
+        return;
+    }
+
+    if (upstreamReply.status !== 200) {
+        helpers.sendStreamError(r, 'bad_gateway', `Upstream LLM error: ${upstreamReply.status}`);
+        return;
+    }
+
+    const rawSSE = upstreamReply.responseText;
+
+    if (scanResponse) {
+        let scanText;
+        try {
+            scanText = helpers.extractSSEContent(rawSSE);
+        } catch (e) {
+            if (e.code === 'tool_call_not_supported') {
+                r.warn(`[guardrails] ${e.message} — skipping response scan`);
+                helpers.replaySSE(r, rawSSE);
+                return;
+            }
+            // no_scannable_content
+            if (failOpen) {
+                r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
+                helpers.replaySSE(r, rawSSE);
+            } else {
+                helpers.blockResponse(r, e.code, e.message);
+            }
+            return;
+        }
+
+        const result = await scanWithGuardrails(r, scanText, failOpen, 'response_blocked');
+        if (!result.pass) {
+            helpers.sendStreamContentFilter(r);
+            return;
+        }
+
+        if (redactResponse && result.redactedContent !== null) {
+            if (process.env.DEBUG === 'true') {
+                r.warn('[guardrails] response redacted — returning modified SSE to client');
+            }
+            const rebuiltSSE = helpers.rebuildSSEWithRedactedContent(rawSSE, result.redactedContent);
+            helpers.replaySSE(r, rebuiltSSE);
+            return;
+        }
+    }
+
+    helpers.replaySSE(r, rawSSE);
+}
 
 // ---------------------------------------------------------------------------
 // js_set callbacks: expose env vars as nginx variables.

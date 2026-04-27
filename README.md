@@ -7,29 +7,35 @@ An nginx + [NJS](https://nginx.org/en/docs/njs/) reverse proxy that adds synchro
 ```
 Client
   │
-  │  POST /v1/chat/completions
+  │  POST /v1/chat/completions  (stream: true or false)
   ▼
 nginx (port 11434)
   │
   ├─ [if SCAN_PROMPT=true]
   │    POST https://<F5_AI_GUARDRAILS_API_URL>/scans
-  │    { input: "<last user message>", project: "<project_id>" }
   │    outcome=flagged → 400 prompt_blocked
   │
   ├─ Subrequest → upstream LLM (OPENAI_API_URL)
-  │    POST /chat/completions
+  │    POST /chat/completions  (stream preserved as-is)
+  │    ← full response buffered by NJS
   │
   ├─ [if SCAN_RESPONSE=true]
   │    POST https://<F5_AI_GUARDRAILS_API_URL>/scans
-  │    { input: "<assistant reply>", project: "<project_id>" }
-  │    outcome=flagged → 400 response_blocked
+  │    Non-streaming: scans choices[].message.content
+  │    Streaming:     assembles delta.content from SSE, scans assembled text
+  │    outcome=flagged →
+  │      Non-streaming: 400 response_blocked
+  │      Streaming:     SSE chunk with finish_reason=content_filter + [DONE]
+  │    outcome=redacted (redact enabled) →
+  │      Non-streaming: JSON body with redacted content
+  │      Streaming:     rebuilt SSE stream with redacted content
   │
-  └─ 200 → Client
+  └─ Response → Client
+       Non-streaming: JSON body
+       Streaming:     SSE replayed from upstream buffer (or rebuilt if redacted)
 ```
 
 All other paths (e.g. `GET /v1/models`) are proxied straight through to the upstream LLM without scanning.
-
-> **Non-streaming only.** Requests with `"stream": true` are rejected with HTTP 400.
 
 ## Prerequisites
 
@@ -115,7 +121,7 @@ docker compose logs -f
 192.168.65.1 - - [27/Apr/2026:02:52:15 +0000] "POST /chat/completions HTTP/1.1" 200 1341 "-" "PostmanRuntime/7.53.0"
 ```
 
-**Redacted response** — response scan returns `redacted` with `REDACT_RESPONSE=true`, modified response returned to client:
+**Redacted response (non-streaming)** — response scan returns `redacted` with `REDACT_RESPONSE=true`, modified response returned to client:
 
 ```
 2026/04/27 02:53:07 [warn] 30#30: *4 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 38 chars)
@@ -126,6 +132,19 @@ docker compose logs -f
 2026/04/27 02:53:12 [warn] 30#30: *4 js: [guardrails] outcome=redacted  policy=  reason=
 2026/04/27 02:53:12 [warn] 30#30: *4 js: [guardrails] response redacted — returning modified body to client
 192.168.65.1 - - [27/Apr/2026:02:53:12 +0000] "POST /chat/completions HTTP/1.1" 200 1289 "-" "PostmanRuntime/7.53.0"
+```
+
+**Redacted response (streaming)** — streaming response scan returns `redacted` with `REDACT_RESPONSE=true`, rebuilt SSE stream with redacted content returned to client:
+
+```
+2026/04/27 02:54:01 [warn] 30#30: *5 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 38 chars)
+2026/04/27 02:54:02 [warn] 30#30: *5 js: [guardrails] scan ← HTTP 200 (874ms)
+2026/04/27 02:54:02 [warn] 30#30: *5 js: [guardrails] outcome=cleared  policy=  reason=
+2026/04/27 02:54:05 [warn] 30#30: *5 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 195 chars)
+2026/04/27 02:54:06 [warn] 30#30: *5 js: [guardrails] scan ← HTTP 200 (391ms)
+2026/04/27 02:54:06 [warn] 30#30: *5 js: [guardrails] outcome=redacted  policy=  reason=
+2026/04/27 02:54:06 [warn] 30#30: *5 js: [guardrails] response redacted — returning modified SSE to client
+192.168.65.1 - - [27/Apr/2026:02:54:06 +0000] "POST /chat/completions HTTP/1.1" 200 643 "-" "PostmanRuntime/7.53.0"
 ```
 
 ## Configuration
@@ -180,7 +199,7 @@ All errors are returned as JSON matching the OpenAI error shape:
 |---|---|---|
 | Prompt blocked | 400 | `prompt_blocked` |
 | Response blocked | 400 | `response_blocked` |
-| Streaming request | 400 | `streaming_not_supported` |
+| Response blocked (streaming) | 200 | `content_filter` (SSE `finish_reason`) |
 | Guardrails unreachable | 400 | `guardrails_unreachable` |
 | Guardrails API error | 400 | `guardrails_api_error` |
 | Upstream LLM error | 502 | `bad_gateway` |
@@ -192,5 +211,6 @@ All errors are returned as JSON matching the OpenAI error shape:
 
 ## Limitations
 
-- **Non-streaming only** — `"stream": true` requests are rejected.
+- **Streaming buffered server-side** — streaming responses are fully buffered by the proxy before scanning. TTFB for streaming requests matches non-streaming latency. Tokens do not reach the client until the full response has been scanned.
+- **Streaming redaction rebuilds the SSE stream** — when a streaming response is redacted, the proxy reconstructs an SSE stream that distributes the redacted content across the same number of chunks as the original upstream response (character-split evenly). The chunk count and all stream metadata (`id`, `model`, `created`, `finish_reason`) are preserved; granular per-token boundaries are not.
 - **Last user message only** — only the most recent `user` message is submitted for prompt scanning, not the full conversation history.
