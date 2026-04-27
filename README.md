@@ -102,7 +102,31 @@ docker compose logs -f
 192.168.65.1 - - [27/Apr/2026:02:51:05 +0000] "POST /chat/completions HTTP/1.1" 400 114 "-" "PostmanRuntime/7.53.0"
 ```
 
-Each request logs two scan events (prompt then response).
+**Redacted prompt** — prompt scan returns `redacted` with `REDACT_PROMPT=true`, modified body forwarded to upstream:
+
+```
+2026/04/27 02:52:11 [warn] 30#30: *3 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 54 chars)
+2026/04/27 02:52:12 [warn] 30#30: *3 js: [guardrails] scan ← HTTP 200 (874ms)
+2026/04/27 02:52:12 [warn] 30#30: *3 js: [guardrails] outcome=redacted  policy=  reason=
+2026/04/27 02:52:12 [warn] 30#30: *3 js: [guardrails] prompt redacted — forwarding modified body to upstream
+2026/04/27 02:52:14 [warn] 30#30: *3 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 143 chars)
+2026/04/27 02:52:15 [warn] 30#30: *3 js: [guardrails] scan ← HTTP 200 (391ms)
+2026/04/27 02:52:15 [warn] 30#30: *3 js: [guardrails] outcome=cleared  policy=  reason=
+192.168.65.1 - - [27/Apr/2026:02:52:15 +0000] "POST /chat/completions HTTP/1.1" 200 1341 "-" "PostmanRuntime/7.53.0"
+```
+
+**Redacted response** — response scan returns `redacted` with `REDACT_RESPONSE=true`, modified response returned to client:
+
+```
+2026/04/27 02:53:07 [warn] 30#30: *4 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 38 chars)
+2026/04/27 02:53:08 [warn] 30#30: *4 js: [guardrails] scan ← HTTP 200 (921ms)
+2026/04/27 02:53:08 [warn] 30#30: *4 js: [guardrails] outcome=cleared  policy=  reason=
+2026/04/27 02:53:11 [warn] 30#30: *4 js: [guardrails] scan → POST https://www.us1.calypsoai.app/backend/v1/scans (input: 187 chars)
+2026/04/27 02:53:12 [warn] 30#30: *4 js: [guardrails] scan ← HTTP 200 (408ms)
+2026/04/27 02:53:12 [warn] 30#30: *4 js: [guardrails] outcome=redacted  policy=  reason=
+2026/04/27 02:53:12 [warn] 30#30: *4 js: [guardrails] response redacted — returning modified body to client
+192.168.65.1 - - [27/Apr/2026:02:53:12 +0000] "POST /chat/completions HTTP/1.1" 200 1289 "-" "PostmanRuntime/7.53.0"
+```
 
 ## Configuration
 
@@ -117,6 +141,8 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | `F5_AI_GUARDRAILS_PROJECT_ID` | ✅ | — | CalypsoAI project ID to scan against |
 | `F5_AI_GUARDRAILS_SCAN_PROMPT` | | `true` | Set to `false` to disable prompt scanning |
 | `F5_AI_GUARDRAILS_SCAN_RESPONSE` | | `true` | Set to `false` to disable response scanning |
+| `F5_AI_GUARDRAILS_REDACT_PROMPT` | | `false` | When `true`, replace the last user/tool message with CalypsoAI's redacted version instead of passing through unchanged. Has no effect if `SCAN_PROMPT` is `false`. |
+| `F5_AI_GUARDRAILS_REDACT_RESPONSE` | | `false` | When `true`, replace the last assistant response with CalypsoAI's redacted version instead of passing through unchanged. Has no effect if `SCAN_RESPONSE` is `false`. |
 | `F5_AI_GUARDRAILS_FAIL_OPEN` | | `false` | Set to `true` to pass requests through to upstream when the guardrails scan API returns any error (network failure, non-2xx, or unparseable response). When `false` (default), scan errors block the request with HTTP 400. |
 | `DEBUG` | | `false` | Set to `true` to log guardrails scan outcomes to the nginx error log |
 
@@ -133,7 +159,8 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 |---|---|
 | `cleared` | Pass through |
 | `flagged` | Block — return HTTP 400 |
-| `redacted` | Pass through (redaction support coming later) |
+| `redacted` (redact disabled) | Pass through unchanged |
+| `redacted` (redact enabled) | Replace flagged content with redacted version; pass through |
 
 ### Error responses
 
@@ -166,5 +193,4 @@ All errors are returned as JSON matching the OpenAI error shape:
 ## Limitations
 
 - **Non-streaming only** — `"stream": true` requests are rejected.
-- **No redaction** — `redacted` outcomes from CalypsoAI are currently treated as `cleared`. Full redaction support is planned.
 - **Last user message only** — only the most recent `user` message is submitted for prompt scanning, not the full conversation history.

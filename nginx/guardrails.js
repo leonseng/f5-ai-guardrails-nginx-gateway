@@ -40,10 +40,10 @@ async function scanWithGuardrails(r, text, failOpen, blockedCode) {
         r.error(`[guardrails] fetch error: ${e}`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_unreachable — passing through`);
-            return { pass: true };
+            return { pass: true, redactedContent: null };
         }
         helpers.blockResponse(r, 'guardrails_unreachable', 'Guardrails scan error: guardrails_unreachable');
-        return { pass: false };
+        return { pass: false, redactedContent: null };
     }
 
     if (debug) {
@@ -55,10 +55,10 @@ async function scanWithGuardrails(r, text, failOpen, blockedCode) {
         r.error(`[guardrails] scan returned HTTP ${scanResp.status}: ${body}`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_api_error — passing through`);
-            return { pass: true };
+            return { pass: true, redactedContent: null };
         }
         helpers.blockResponse(r, 'guardrails_api_error', 'Guardrails scan error: guardrails_api_error');
-        return { pass: false };
+        return { pass: false, redactedContent: null };
     }
 
     let result;
@@ -68,10 +68,10 @@ async function scanWithGuardrails(r, text, failOpen, blockedCode) {
         r.error(`[guardrails] failed to parse scan response`);
         if (failOpen) {
             r.warn(`[guardrails] scan error (fail-open): guardrails_parse_error — passing through`);
-            return { pass: true };
+            return { pass: true, redactedContent: null };
         }
         helpers.blockResponse(r, 'guardrails_parse_error', 'Guardrails scan error: guardrails_parse_error');
-        return { pass: false };
+        return { pass: false, redactedContent: null };
     }
 
     const outcome = result && result.result && result.result.outcome;  // "cleared" | "flagged" | "redacted"
@@ -85,10 +85,15 @@ async function scanWithGuardrails(r, text, failOpen, blockedCode) {
     if (outcome === 'flagged') {
         const label = blockedCode === 'prompt_blocked' ? 'Prompt' : 'Response';
         helpers.blockResponse(r, blockedCode, `${label} blocked by AI Guardrails: ${outcome}`);
-        return { pass: false };
+        return { pass: false, redactedContent: null };
     }
 
-    return { pass: true };
+    if (outcome === 'redacted') {
+        const redactedContent = (result.redactedInput) || null;
+        return { pass: true, redactedContent };
+    }
+
+    return { pass: true, redactedContent: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +110,8 @@ async function handleChatCompletions(r) {
     const scanPrompt = process.env.F5_AI_GUARDRAILS_SCAN_PROMPT === 'true';
     const scanResponse = process.env.F5_AI_GUARDRAILS_SCAN_RESPONSE === 'true';
     const failOpen = process.env.F5_AI_GUARDRAILS_FAIL_OPEN === 'true';
+    const redactPrompt   = process.env.F5_AI_GUARDRAILS_REDACT_PROMPT   === 'true';
+    const redactResponse = process.env.F5_AI_GUARDRAILS_REDACT_RESPONSE === 'true';
 
     // 1. Parse request body.
     let reqBody;
@@ -164,6 +171,20 @@ async function handleChatCompletions(r) {
         if (promptText) {
             const result = await scanWithGuardrails(r, promptText, failOpen, 'prompt_blocked');
             if (!result.pass) return;
+
+            if (redactPrompt && result.redactedContent !== null) {
+                // Write the redacted text back into the last user/tool message,
+                // mirroring the same message extractRequestScanText() read from.
+                for (let i = reqBody.messages.length - 1; i >= 0; i--) {
+                    if (reqBody.messages[i].role === 'user' || reqBody.messages[i].role === 'tool') {
+                        reqBody.messages[i].content = result.redactedContent;
+                        break;
+                    }
+                }
+                if (process.env.DEBUG === 'true') {
+                    r.warn('[guardrails] prompt redacted — forwarding modified body to upstream');
+                }
+            }
         }
     }
 
@@ -172,7 +193,7 @@ async function handleChatCompletions(r) {
     try {
         upstreamReply = await r.subrequest('/app/', {
             method: r.method,
-            body: r.requestText
+            body:   JSON.stringify(reqBody)
         });
     } catch (e) {
         r.error(`[guardrails] upstream subrequest error: ${e}`);
@@ -222,6 +243,23 @@ async function handleChatCompletions(r) {
         if (responseText) {
             const result = await scanWithGuardrails(r, responseText, failOpen, 'response_blocked');
             if (!result.pass) return;
+
+            if (redactResponse && result.redactedContent !== null) {
+                // Write the redacted text back into the last assistant choice,
+                // mirroring the same choice extractResponseScanText() read from.
+                const choices = respBody.choices || [];
+                const last = choices[choices.length - 1];
+                if (last && last.message) {
+                    last.message.content = result.redactedContent;
+                }
+                if (process.env.DEBUG === 'true') {
+                    r.warn('[guardrails] response redacted — returning modified body to client');
+                }
+
+                r.headersOut['Content-Type'] = 'application/json';
+                r.return(200, JSON.stringify(respBody));
+                return;
+            }
         }
     }
 
