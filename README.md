@@ -7,7 +7,7 @@ An nginx + [NJS](https://nginx.org/en/docs/njs/) reverse proxy that adds synchro
 ```
 Client
   │
-  │  POST /v1/chat/completions  (stream: true or false)
+  │  POST /chat/completions  (stream: true or false)
   ▼
 nginx (port 11434)
   │
@@ -35,7 +35,7 @@ nginx (port 11434)
        Streaming:     SSE replayed from upstream buffer (or rebuilt if redacted)
 ```
 
-All other paths (e.g. `GET /v1/models`) are proxied straight through to the upstream LLM without scanning.
+All other paths (e.g. `GET /models`) are proxied straight through to the upstream LLM without scanning.
 
 ## Prerequisites
 
