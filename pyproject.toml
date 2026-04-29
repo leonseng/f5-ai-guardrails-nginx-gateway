@@ -1,0 +1,18 @@
+[project]
+name = "f5-guardrails-tests"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "flask",
+    "requests",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-ordering"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["last: run this test class after all others"]
