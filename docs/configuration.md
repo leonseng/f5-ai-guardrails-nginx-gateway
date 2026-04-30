@@ -7,7 +7,6 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `OPENAI_API_URL` | ✅ | — | Base URL of the upstream LLM, including the `/v1` path prefix (e.g. `https://your.ollama.host:11434/v1`) |
-| `OPENAI_API_KEY` | ✅ | — | API key forwarded to the upstream LLM as `Authorization: Bearer <key>` |
 | `F5_AI_GUARDRAILS_API_URL` | ✅ | — | CalypsoAI API base URL (e.g. `https://www.us1.calypsoai.app/backend/v1`) |
 | `F5_AI_GUARDRAILS_API_TOKEN` | ✅ | — | CalypsoAI API bearer token |
 | `F5_AI_GUARDRAILS_PROJECT_ID` | ✅ | — | CalypsoAI project ID to scan against |

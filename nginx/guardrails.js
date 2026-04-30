@@ -107,7 +107,7 @@ async function handleChatCompletions(r) {
     const scanPrompt = process.env.F5_AI_GUARDRAILS_SCAN_PROMPT === 'true';
     const scanResponse = process.env.F5_AI_GUARDRAILS_SCAN_RESPONSE === 'true';
     const failOpen = process.env.F5_AI_GUARDRAILS_FAIL_OPEN === 'true';
-    const redactPrompt   = process.env.F5_AI_GUARDRAILS_REDACT_PROMPT   === 'true';
+    const redactPrompt = process.env.F5_AI_GUARDRAILS_REDACT_PROMPT === 'true';
     const redactResponse = process.env.F5_AI_GUARDRAILS_REDACT_RESPONSE === 'true';
 
     let reqBody;
@@ -177,7 +177,7 @@ async function handleChatCompletions(r) {
     }
 }
 
-export default { handleChatCompletions, getOpenaiUrl, getOpenaiKey };
+export default { handleChatCompletions };
 
 // ---------------------------------------------------------------------------
 // Non-streaming path: subrequest to upstream, scan JSON response, return to client.
@@ -185,9 +185,9 @@ export default { handleChatCompletions, getOpenaiUrl, getOpenaiKey };
 async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
     let upstreamReply;
     try {
-        upstreamReply = await r.subrequest('/app/', {
+        upstreamReply = await r.subrequest('/app/chat/completions', {
             method: r.method,
-            body:   JSON.stringify(reqBody)
+            body: JSON.stringify(reqBody)
         });
     } catch (e) {
         r.error(`[guardrails] upstream subrequest error: ${e}`);
@@ -267,7 +267,7 @@ async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, red
 async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
     let upstreamReply;
     try {
-        upstreamReply = await r.subrequest('/app/', {
+        upstreamReply = await r.subrequest('/app/chat/completions', {
             method: r.method,
             body: JSON.stringify(reqBody)
         });
@@ -322,9 +322,3 @@ async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redact
 
     helpers.replaySSE(r, rawSSE);
 }
-
-// ---------------------------------------------------------------------------
-// js_set callbacks: expose env vars as nginx variables.
-// ---------------------------------------------------------------------------
-function getOpenaiUrl(r) { return process.env.OPENAI_API_URL || ''; }
-function getOpenaiKey(r) { return process.env.OPENAI_API_KEY || ''; }

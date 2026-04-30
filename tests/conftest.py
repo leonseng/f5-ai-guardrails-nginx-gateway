@@ -91,7 +91,6 @@ def _base_env() -> dict:
     return {
         **os.environ,
         "OPENAI_API_URL": LLM_URL_FOR_CONTAINER,
-        "OPENAI_API_KEY": "your-openai-or-ollama-api-key",
         "F5_AI_GUARDRAILS_API_URL": GUARDRAILS_URL_FOR_CONTAINER,
         "F5_AI_GUARDRAILS_API_TOKEN": "your_guardrails_api_token",
         "F5_AI_GUARDRAILS_PROJECT_ID": "your_project_id",

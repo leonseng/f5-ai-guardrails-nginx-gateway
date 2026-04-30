@@ -7,8 +7,6 @@ error_log /var/log/nginx/error.log warn;
 # All env vars that NJS reads via process.env must be declared here,
 # at the top-level (main) context, outside http {}.
 # nginx strips env vars by default; these directives preserve them.
-env OPENAI_API_URL;
-env OPENAI_API_KEY;
 env F5_AI_GUARDRAILS_API_URL;
 env F5_AI_GUARDRAILS_API_TOKEN;
 env F5_AI_GUARDRAILS_PROJECT_ID;
@@ -28,11 +26,6 @@ http {
     # Trust the system CA bundle for ngx.fetch() HTTPS calls (e.g. F5 AI Guardrails API).
     js_fetch_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 
-    # Expose env vars as nginx variables via NJS js_set.
-    # The env directives in the main context make these available to process.env.
-    js_set $openai_url   main.getOpenaiUrl;
-    js_set $openai_key   main.getOpenaiKey;
-
     # Required when proxy_pass uses a variable (set $var ...).
     # 127.0.0.11 is Docker's embedded DNS resolver.
     resolver 127.0.0.11 valid=10s;
@@ -48,8 +41,7 @@ http {
 
         # Pass all non-completions traffic straight through (e.g. /models).
         location / {
-            proxy_pass           $openai_url$request_uri;
-            proxy_set_header     Authorization "Bearer $openai_key";
+            proxy_pass           ${OPENAI_API_URL}/;
             proxy_set_header     Host $proxy_host;
             proxy_ssl_server_name on;
         }
@@ -60,11 +52,9 @@ http {
         }
 
         # Internal-only upstream LLM backend; NJS subrequests land here.
-        # Rewrite strips /app/ prefix; /v1 prefix is part of OPENAI_API_URL base.
         location /app/ {
             internal;
-            proxy_pass           $openai_url/chat/completions;
-            proxy_set_header     Authorization "Bearer $openai_key";
+            proxy_pass           ${OPENAI_API_URL}/;
             proxy_set_header     Host $proxy_host;
             proxy_set_header     Content-Type "application/json";
             proxy_pass_request_body on;
