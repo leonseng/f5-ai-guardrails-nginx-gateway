@@ -2,6 +2,8 @@
 
 An nginx + [NJS](https://nginx.org/en/docs/njs/) reverse proxy that adds synchronous [F5 AI Guardrails](https://www.f5.com/products/ai-guardrails) sideband scanning to any OpenAI-compatible LLM API. Both the prompt and the LLM response are scanned before being passed on. Flagged content is blocked; everything else passes through.
 
+![Overview](docs/img/f5-ai-guardrails-nginx-gateway.excalidraw.png)
+
 ## Architecture
 
 ```
