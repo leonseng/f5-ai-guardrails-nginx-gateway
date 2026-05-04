@@ -9,11 +9,13 @@ FLAGGED_TEXT = DATASET["FLAGGED"]["text"]
 
 
 class TestGuardrailsValidationError:
+    # guardrails returns a 422 when the scan request is invalid (e.g. missing required fields, or invalid JSON).
+    # NGINX should return a 502 to the client in this case, since it's a misconfiguration of the guardrails service that the client can't do anything about.
     def test_422_handled(self, guardrails_scenario, llm_scenario):
         guardrails_scenario.set("422")
         llm_scenario.set("normal")
         resp = chat_request(CLEARED_TEXT)
-        assert resp.status_code == 400
+        assert resp.status_code == 502
         assert "error" in resp.json()
 
 

@@ -48,7 +48,7 @@ async function handleChatCompletions(r) {
                     helpers.contentFilterResponse(r, reqBody.model, reqBody.stream === true);
                     return;
                 } else {
-                    helpers.errorResponse(r, 400, result.error.code, result.error.message);
+                    helpers.errorResponse(r, 502, result.error.code, result.error.message);
                     return;
                 }
             }

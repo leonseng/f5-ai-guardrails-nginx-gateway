@@ -13,7 +13,7 @@ nginx (port 11434)
   │
   ├─ [if SCAN_PROMPT=true]
   │    POST https://<F5_AI_GUARDRAILS_API_URL>/scans
-  │    outcome=flagged → 400 prompt_blocked
+  │    outcome=flagged → 200 finish_reason=content_filter
   │
   ├─ Subrequest → upstream LLM (OPENAI_API_URL)
   │    POST /chat/completions  (stream preserved as-is)
@@ -23,9 +23,7 @@ nginx (port 11434)
   │    POST https://<F5_AI_GUARDRAILS_API_URL>/scans
   │    Non-streaming: scans choices[].message.content
   │    Streaming:     assembles delta.content from SSE, scans assembled text
-  │    outcome=flagged →
-  │      Non-streaming: 400 response_blocked
-  │      Streaming:     SSE chunk with finish_reason=content_filter + [DONE]
+  │    outcome=flagged → 200 finish_reason=content_filter
   │    outcome=redacted (redact enabled) →
   │      Non-streaming: JSON body with redacted content
   │      Streaming:     rebuilt SSE stream with redacted content
