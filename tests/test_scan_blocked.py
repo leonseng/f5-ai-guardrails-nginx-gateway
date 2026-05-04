@@ -1,62 +1,72 @@
-from helpers import chat_request, stream_chat_request
+import pytest
+
+from conf_helper import chat_request, collect_sse_chunks, assemble_content_from_chunks
+from conf_helper import DATASET
+
+CLEARED_TEXT = DATASET["CLEARED"]["text"]
+FLAGGED_TEXT = DATASET["FLAGGED"]["text"]
 
 
 class TestGuardrailsBlocked:
     # --- non-streaming ---
 
-    def test_status_400(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
+    def test_non_streaming_blocked_prompt(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
         llm_scenario.set("normal")
-        assert chat_request("bad prompt").status_code == 400
 
-    def test_error_type_guardrails_block(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
+        resp = chat_request(FLAGGED_TEXT)
+
+        assert resp.status_code == 200
+        assert "application/json" == resp.headers.get("Content-Type", "")
+
+        body = resp.json()
+        assert body["choices"][0]["finish_reason"] == "content_filter"
+
+    def test_non_streaming_blocked_response(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="FLAGGED")
+
+        resp = chat_request(CLEARED_TEXT)
+
+        assert resp.status_code == 200
+        assert "application/json" == resp.headers.get("Content-Type", "")
+
+        body = resp.json()
+        assert body["choices"][0]["finish_reason"] == "content_filter"
+
+    def test_streaming_blocked_prompt(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
         llm_scenario.set("normal")
-        body = chat_request("bad prompt").json()
-        assert body["error"]["type"] == "guardrails_block"
 
-    def test_error_code_prompt_blocked(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        body = chat_request("bad prompt").json()
-        assert body["error"]["code"] == "prompt_blocked"
+        resp = chat_request(FLAGGED_TEXT, True)
 
-    def test_error_message_contains_flagged(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        body = chat_request("bad prompt").json()
-        assert "flagged" in body["error"]["message"]
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
 
-    def test_no_choices_in_blocked_response(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        body = chat_request("bad prompt").json()
-        assert "choices" not in body, "Blocked response should not contain choices"
+        chunks = collect_sse_chunks(resp)
+        finish_reasons = [
+            c["choices"][0]["finish_reason"]
+            for c in chunks
+            if c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["content_filter"]
 
-    # --- streaming ---
+    def test_streaming_blocked_response(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="FLAGGED")
+        resp = chat_request(CLEARED_TEXT, True)
 
-    def test_streaming_status_400(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        resp = stream_chat_request("bad prompt")
-        assert resp.status_code == 400
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
 
-    def test_streaming_error_type_guardrails_block(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        body = stream_chat_request("bad prompt").json()
-        assert body["error"]["type"] == "guardrails_block"
+        chunks = collect_sse_chunks(resp)
+        content = assemble_content_from_chunks(chunks)
 
-    def test_streaming_error_code_prompt_blocked(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        body = stream_chat_request("bad prompt").json()
-        assert body["error"]["code"] == "prompt_blocked"
+        assert content == ""
 
-    def test_streaming_no_sse_chunks_emitted(self, guardrails_scenario, llm_scenario):
-        """Blocked requests should not emit any SSE chunks at all."""
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        resp = stream_chat_request("bad prompt")
-        # Response is not SSE — should be plain JSON error, no data: lines
-        assert "text/event-stream" not in resp.headers.get("Content-Type", "")
+        finish_reasons = [
+            c["choices"][0]["finish_reason"]
+            for c in chunks
+            if c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["content_filter"]

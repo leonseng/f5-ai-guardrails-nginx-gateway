@@ -45,13 +45,13 @@ Each test declares which scenario it needs via fixtures:
 
 | Fixture | Values |
 |---|---|
-| `guardrails_scenario` | `cleared` (default), `blocked`, `redacted`, `422`, `guardrails_error` |
+| `guardrails_scenario` | `cleared` (default), `blocked`, `redacted`, `422`, `error` |
 | `llm_scenario` | `normal` (default), `refusal`, `error`, `unavailable` |
 
 ```python
 def test_something(guardrails_scenario, llm_scenario):
-    guardrails_scenario.set("blocked")
-    llm_scenario.set("normal")
+    guardrails_scenario.set("normal")
+    llm_scenario.set("cleared")
     resp = chat_request("anything")
     assert resp.status_code == 400
 ```
@@ -66,5 +66,5 @@ Scenarios reset to their defaults after each test automatically.
 | `test_scan_blocked.py` | Prompt or response flagged — proxy returns 400 |
 | `test_scan_redacted.py` | Prompt or response redacted — asterisks in content |
 | `test_llm_errors.py` | LLM backend returns 500 / 503 / `content_filter` |
-| `test_guardrails_errors.py` | Guardrails returns 422 or 500; fail-open passthrough behaviour |
+| `test_errors.py` | Guardrails returns 422 or 500; fail-open passthrough behaviour |
 | `test_combined.py` | Cross-cutting scenarios (e.g. blocked overrides LLM error) |

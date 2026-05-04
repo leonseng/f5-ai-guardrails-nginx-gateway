@@ -1,177 +1,20 @@
 import logging
 import json
+
 import threading
-from flask import Flask, jsonify, request
+from typing import Optional
+from flask import Flask, request, Response, stream_with_context
 
-
-# ---------------------------------------------------------------------------
-# Guardrails canned responses
-# ---------------------------------------------------------------------------
-
-BLOCKED_RESPONSE = {
-    "id": "019dd656-44a6-70b5-b9a2-93c1042f1521",
-    "result": {
-        "scannerResults": [
-            {
-                "scannerId": "019a7598-8cc7-7091-9520-b73c9c627f23",
-                "scannerVersionMeta": {
-                    "id": "019a7598-8cc7-70a7-a527-a27cf83e8c56",
-                    "createdAt": "2025-11-12T01:05:23.143682+00:00",
-                    "createdBy": "auth0|68d3a0462a5394006b349021",
-                    "name": "v_1",
-                    "published": True,
-                    "description": "",
-                },
-                "outcome": "failed",
-                "data": {"type": "custom"},
-                "customConfig": False,
-                "startedDate": "2026-04-28T23:06:42.590482+00:00",
-                "completedDate": "2026-04-28T23:06:42.650378+00:00",
-                "scanDirection": "request",
-            }
-        ],
-        "outcome": "flagged",
-    },
-    "redactedInput": "Are grocery prices at Woolworths cheaper than those at Aldi",
-}
-
-REDACTED_RESPONSE = {
-    "id": "019dd657-7e2b-706b-acc3-df48f4848f17",
-    "result": {
-        "scannerResults": [
-            {
-                "scannerId": "01999a5a-9b8f-70ba-9625-516f734166c8",
-                "scannerVersionMeta": {
-                    "id": "019a80d9-ce81-7057-977f-48ccc1dcd6cc",
-                    "createdAt": "2025-11-14T05:32:29.185378+00:00",
-                    "createdBy": "auth0|68d3a0462a5394006b349021",
-                    "name": "v_2",
-                    "published": True,
-                    "description": "",
-                },
-                "outcome": "failed",
-                "data": {
-                    "type": "keyword",
-                    "matches": {
-                        "blueberry": [[12, 21]],
-                        "Blueberry": [[12, 21]],
-                    },
-                },
-                "customConfig": False,
-                "startedDate": "2026-04-28T23:05:51.406807+00:00",
-                "completedDate": "2026-04-28T23:05:51.407002+00:00",
-                "scanDirection": "request",
-            }
-        ],
-        "outcome": "redacted",
-    },
-    "redactedInput": "do you like *********?",
-}
-
-CLEARED_RESPONSE = {
-    "id": "019dd658-f82f-7004-a9bd-ba7a792dfa76",
-    "result": {
-        "scannerResults": [
-            {
-                "scannerId": "01999a5a-9b8f-70ba-9625-516f734166c8",
-                "scannerVersionMeta": {
-                    "id": "019a80d9-ce81-7057-977f-48ccc1dcd6cc",
-                    "createdAt": "2025-11-14T05:32:29.185378+00:00",
-                    "createdBy": "auth0|68d3a0462a5394006b349021",
-                    "name": "v_2",
-                    "published": True,
-                    "description": "",
-                },
-                "outcome": "passed",
-                "data": {"type": "keyword", "matches": {}},
-                "customConfig": False,
-                "startedDate": "2026-04-28T23:07:28.176544+00:00",
-                "completedDate": "2026-04-28T23:07:28.176753+00:00",
-                "scanDirection": "request",
-            }
-        ],
-        "outcome": "cleared",
-    },
-    "redactedInput": "do you like apple?",
-}
-
-GUARDRAILS_ERROR_RESPONSE = {
-    "detail": "Internal server error",
-}
-
-GUARDRAILS_VALIDATION_ERROR = {
-    "detail": [
-        {
-            "loc": ["body", "input"],
-            "msg": "field required",
-            "type": "value_error.missing",
-        }
-    ]
-}
-
-# ---------------------------------------------------------------------------
-# LLM backend canned responses
-# ---------------------------------------------------------------------------
-
-LLM_NORMAL_RESPONSE = {
-    "id": "chatcmpl-mock-normal",
-    "object": "chat.completion",
-    "created": 1714348800,
-    "model": "mock-llm",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "This is a normal mock LLM response.",
-            },
-            "finish_reason": "stop",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 9, "total_tokens": 19},
-}
-
-LLM_REFUSAL_RESPONSE = {
-    "id": "chatcmpl-mock-refusal",
-    "object": "chat.completion",
-    "created": 1714348800,
-    "model": "mock-llm",
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "I'm sorry, I can't help with that.",
-            },
-            "finish_reason": "content_filter",
-        }
-    ],
-    "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
-}
-
-LLM_ERROR_RESPONSE = {
-    "error": {
-        "message": "Internal server error from mock LLM backend.",
-        "type": "server_error",
-        "code": 500,
-    }
-}
-
-LLM_UNAVAILABLE_RESPONSE = {
-    "error": {
-        "message": "Service unavailable.",
-        "type": "server_error",
-        "code": 503,
-    }
-}
-
-LLM_MODELS_RESPONSE = {
-    "object": "list",
-    "data": [
-        {"id": "mock-llm", "object": "model", "created": 1714348800, "owned_by": "mock"},
-        {"id": "mock-llm-v2", "object": "model", "created": 1714348800, "owned_by": "mock"},
-    ],
-}
+from conf_helper import (
+    DATASET,
+    GUARDRAILS_RESPONSE_TEMPLATE,
+    LLM_RESPONSE_TEMPLATE,
+    GUARDRAILS_VALIDATION_ERROR,
+    GUARDRAILS_ERROR_RESPONSE,
+    LLM_ERROR_RESPONSE,
+    LLM_UNAVAILABLE_RESPONSE,
+    LLM_MODELS_RESPONSE
+)
 
 # ---------------------------------------------------------------------------
 # Scenario controllers
@@ -193,7 +36,7 @@ class _ScenarioController:
         with self._lock:
             self._state["value"] = scenario
 
-    def get(self) -> str:
+    def get_scenario(self) -> str:
         with self._lock:
             return self._state["value"]
 
@@ -201,12 +44,32 @@ class _ScenarioController:
         self.set(self._default)
 
 
+class _LLMScenarioController(_ScenarioController):
+    def set(self, scenario: str, response_type: Optional[str] = None, finish_reason: Optional[str] = None) -> None:
+        if scenario not in self.VALID:
+            raise ValueError(
+                f"Unknown scenario '{scenario}'. Choose from {self.VALID}"
+            )
+        with self._lock:
+            self._state["value"] = scenario
+            self._state["response_type"] = response_type or ""
+            self._state["finish_reason"] = finish_reason or ""
+
+    def get_response(self) -> str:
+        with self._lock:
+            return DATASET.get(self._state["response_type"], DATASET["CLEARED"])["text"]
+
+    def get_finish_reason(self) -> str:
+        with self._lock:
+            return self._state["finish_reason"] if self._state["finish_reason"] else "stop"
+
+
 guardrails_controller = _ScenarioController(
-    valid={"cleared", "blocked", "redacted", "422", "guardrails_error"},
-    default="cleared",
+    valid={"normal", "422", "error"},
+    default="normal",
 )
 
-llm_controller = _ScenarioController(
+llm_controller = _LLMScenarioController(
     valid={"normal", "refusal", "error", "unavailable"},
     default="normal",
 )
@@ -221,34 +84,49 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 # --- Guardrails mock ---
 
 _guardrails_app = Flask("guardrails_mock")
-_guardrails_app.logger.disabled = True
+# _guardrails_app.logger.disabled = True
 
 
 @_guardrails_app.post("/backend/v1/scans")
 def scans():
-    scenario = guardrails_controller.get()
-    if scenario == "blocked":
-        return jsonify(BLOCKED_RESPONSE), 200
-    if scenario == "redacted":
-        return jsonify(REDACTED_RESPONSE), 200
+    scenario = guardrails_controller.get_scenario()
+
     if scenario == "422":
-        return jsonify(GUARDRAILS_VALIDATION_ERROR), 422
-    if scenario == "guardrails_error":
-        return jsonify(GUARDRAILS_ERROR_RESPONSE), 500
-    return jsonify(CLEARED_RESPONSE), 200
+        return Response(json.dumps(GUARDRAILS_VALIDATION_ERROR), status=422, mimetype='application/json')
+
+    if scenario == "error":
+        return Response(json.dumps(GUARDRAILS_ERROR_RESPONSE), status=500, mimetype='application/json')
+
+    if scenario == "normal":
+        scan_input = (request.get_json(silent=True, force=True) or {}).get("input", "")
+
+        # if scan_input matches one of our known test inputs, return the corresponding canned outcome; otherwise default to "cleared"
+        for key, entry in DATASET.items():
+            if scan_input == entry["text"]:
+                return Response(GUARDRAILS_RESPONSE_TEMPLATE.substitute(
+                    outcome=entry["scan_outcome"],
+                    redactedInput=DATASET["REDACTED"]["text"] if key == "REDACTABLE" else entry["text"]
+                ), status=200, mimetype='application/json')
+
+        return Response(GUARDRAILS_RESPONSE_TEMPLATE.substitute(
+            outcome="cleared",
+            redactedInput=scan_input
+        ), status=200, mimetype='application/json')
+
+    return Response(json.dumps({"error": f"Unknown scenario '{scenario}'"}), status=500, mimetype='application/json')
 
 
 # --- LLM backend mock ---
 
 _llm_app = Flask("llm_mock")
-_llm_app.logger.disabled = True
+# _llm_app.logger.disabled = True
 
 
 @_llm_app.get("/v1/models")
 @_llm_app.get("/models")
 def models():
     """Model listing — always succeeds regardless of scenario."""
-    return jsonify(LLM_MODELS_RESPONSE), 200
+    return Response(json.dumps(LLM_MODELS_RESPONSE), status=200, mimetype='application/json')
 
 
 def _sse_chunk(delta: dict, finish_reason=None) -> str:
@@ -287,28 +165,21 @@ def _stream_response(content: str, finish_reason: str = "stop"):
 @_llm_app.post("/v1/chat/completions")
 @_llm_app.post("/chat/completions")
 def chat_completions():
-    from flask import Response, stream_with_context
+    scenario = llm_controller.get_scenario()
+    response = llm_controller.get_response()
+    finish_reason = llm_controller.get_finish_reason()
 
-    scenario = llm_controller.get()
-    streaming = request.get_json(silent=True, force=True).get("stream", False)
+    streaming = (request.get_json(silent=True, force=True) or {}).get("stream", False)
 
     # Error scenarios are the same regardless of streaming mode.
     if scenario == "error":
-        return jsonify(LLM_ERROR_RESPONSE), 500
+        return Response(json.dumps(LLM_ERROR_RESPONSE), status=500, mimetype='application/json')
     if scenario == "unavailable":
-        return jsonify(LLM_UNAVAILABLE_RESPONSE), 503
-
-    # Determine content and finish_reason for the scenario.
-    if scenario == "refusal":
-        content = "I'm sorry, I can't help with that."
-        finish_reason = "content_filter"
-    else:  # "normal"
-        content = "This is a normal mock LLM response."
-        finish_reason = "stop"
+        return Response(json.dumps(LLM_UNAVAILABLE_RESPONSE), status=503, mimetype='application/json')
 
     if streaming:
         return Response(
-            stream_with_context(_stream_response(content, finish_reason)),
+            stream_with_context(_stream_response(response, finish_reason)),
             status=200,
             mimetype="text/event-stream",
             headers={
@@ -318,11 +189,9 @@ def chat_completions():
         )
 
     # Non-streaming — pick the right canned response.
-    if scenario == "refusal":
-        return jsonify(LLM_REFUSAL_RESPONSE), 200
-    return jsonify(LLM_NORMAL_RESPONSE), 200
+    return Response(LLM_RESPONSE_TEMPLATE.substitute(content=response, finish_reason=finish_reason), status=200, mimetype='application/json')
 
 
 @_llm_app.get("/health")
 def llm_health():
-    return jsonify({"status": "ok"}), 200
+    return Response(json.dumps({"status": "ok"}), status=200, mimetype='application/json')

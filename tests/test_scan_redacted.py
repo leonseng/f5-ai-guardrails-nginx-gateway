@@ -1,34 +1,52 @@
-from helpers import chat_request, stream_chat_request, collect_sse_chunks, assemble_content_from_chunks
+from conf_helper import chat_request, collect_sse_chunks, assemble_content_from_chunks
+from conf_helper import DATASET
+
+CLEARED_TEXT = DATASET["CLEARED"]["text"]
+REDACTABLE_TEXT = DATASET["REDACTABLE"]["text"]
+REDACTED_TEXT = DATASET["REDACTED"]["text"]
 
 
 class TestGuardrailsRedacted:
-    # --- non-streaming ---
-
-    def test_status_200(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("redacted")
-        llm_scenario.set("normal")
-        assert chat_request("do you like blueberry?").status_code == 200
-
-    def test_redacted_content_contains_asterisks(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("redacted")
-        llm_scenario.set("normal")
-        body = chat_request("do you like blueberry?").json()
-        content = body["choices"][0]["message"]["content"]
-        assert "*" in content, f"Expected asterisks in redacted content, got: {content!r}"
-
-    # --- streaming ---
-
-    def test_streaming_status_200(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("redacted")
-        llm_scenario.set("normal")
-        resp = stream_chat_request("do you like blueberry?")
+    def test_non_streaming_redacted_prompt(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="REDACTED")
+        resp = chat_request(REDACTABLE_TEXT)
         assert resp.status_code == 200
 
-    def test_streaming_redacted_content_contains_asterisks(self, guardrails_scenario, llm_scenario):
-        guardrails_scenario.set("redacted")
-        llm_scenario.set("normal")
-        chunks = collect_sse_chunks(stream_chat_request("do you like blueberry?"))
-        assembled = assemble_content_from_chunks(chunks)
-        assert "*" in assembled, (
-            f"Expected asterisks in assembled streamed content, got: {assembled!r}"
-        )
+        body = resp.json()
+        assert body["choices"][0]["finish_reason"] == "stop"
+
+        content = body["choices"][0]["message"]["content"]
+        assert content == REDACTED_TEXT
+
+    def test_non_streaming_redacted_response(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="REDACTABLE")
+        resp = chat_request(CLEARED_TEXT)
+        assert resp.status_code == 200
+
+        body = resp.json()
+        assert body["choices"][0]["finish_reason"] == "stop"
+
+        content = body["choices"][0]["message"]["content"]
+        assert content == REDACTED_TEXT
+
+    def test_streaming_redacted(self, guardrails_scenario, llm_scenario):
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="REDACTABLE")
+        resp = chat_request(CLEARED_TEXT, True)
+        assert resp.status_code == 200
+
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
+
+        chunks = collect_sse_chunks(resp)
+
+        content = assemble_content_from_chunks(chunks)
+        assert content == REDACTED_TEXT
+
+        finish_reasons = [
+            c["choices"][0]["finish_reason"]
+            for c in chunks
+            if c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["stop"]

@@ -1,14 +1,20 @@
 import pytest
 
-from helpers import chat_request, stream_chat_request, collect_sse_chunks, assemble_content_from_chunks
+from conf_helper import chat_request, collect_sse_chunks, assemble_content_from_chunks
+from conf_helper import DATASET
+
+
+CLEARED_TEXT = DATASET["CLEARED"]["text"]
+FLAGGED_TEXT = DATASET["FLAGGED"]["text"]
 
 
 class TestGuardrailsValidationError:
     def test_422_handled(self, guardrails_scenario, llm_scenario):
         guardrails_scenario.set("422")
         llm_scenario.set("normal")
-        resp = chat_request("anything")
-        assert resp.status_code in (422, 500) or "error" in resp.json()
+        resp = chat_request(CLEARED_TEXT)
+        assert resp.status_code == 400
+        assert "error" in resp.json()
 
 
 @pytest.mark.last
@@ -22,40 +28,65 @@ class TestFailOpen:
     with FAIL_OPEN=true before the test and restores FAIL_OPEN=false after.
     """
 
-    def test_passthrough_on_scan_500(self, fail_open_container, guardrails_scenario, llm_scenario):
-        """Proxy should forward to LLM when /scans returns 500."""
-        guardrails_scenario.set("guardrails_error")
-        llm_scenario.set("normal")
-        resp = chat_request("anything")
+    @pytest.mark.parametrize("scan_outcome", ["error", "422"])
+    def test_non_streaming_passthrough_on_scan_failure(self, fail_open_container, guardrails_scenario, llm_scenario, scan_outcome):
+        guardrails_scenario.set(scan_outcome)
+        llm_scenario.set("normal", response_type="FLAGGED")
+        resp = chat_request(FLAGGED_TEXT)
         assert resp.status_code == 200
 
-    def test_passthrough_returns_llm_content(self, fail_open_container, guardrails_scenario, llm_scenario):
-        """LLM response should be returned intact when guardrails is bypassed."""
-        guardrails_scenario.set("guardrails_error")
-        llm_scenario.set("normal")
-        body = chat_request("anything").json()
+        body = resp.json()
         assert "choices" in body
-        assert body["choices"][0]["message"]["content"] == "This is a normal mock LLM response."
+        assert body["choices"][0]["message"]["content"] == FLAGGED_TEXT
 
-    def test_passthrough_on_scan_422(self, fail_open_container, guardrails_scenario, llm_scenario):
-        """Proxy should also pass through when /scans returns 422."""
-        guardrails_scenario.set("422")
-        llm_scenario.set("normal")
-        resp = chat_request("anything")
-        assert resp.status_code == 200
+        content = body["choices"][0]["message"]["content"]
+        assert content == FLAGGED_TEXT
 
-    def test_streaming_passthrough_assembles_content(self, fail_open_container, guardrails_scenario, llm_scenario):
-        """Streamed LLM content should arrive intact when guardrails is bypassed."""
-        guardrails_scenario.set("guardrails_error")
-        llm_scenario.set("normal")
-        chunks = collect_sse_chunks(stream_chat_request("anything"))
-        assembled = assemble_content_from_chunks(chunks).strip()
-        assert len(assembled) > 0
-
-    def test_fail_open_does_not_affect_blocked(self, fail_open_container, guardrails_scenario, llm_scenario):
+    def test_non_streaming_fail_open_does_not_affect_blocked(self, fail_open_container, guardrails_scenario, llm_scenario):
         """FAIL_OPEN only applies to scan errors — a 200 blocked response must still block."""
-        guardrails_scenario.set("blocked")
-        llm_scenario.set("normal")
-        resp = chat_request("bad prompt")
-        assert resp.status_code == 400
-        assert resp.json()["error"]["type"] == "guardrails_block"
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="FLAGGED")
+        resp = chat_request(FLAGGED_TEXT)
+
+        assert resp.status_code == 200
+        assert "application/json" == resp.headers.get("Content-Type", "")
+
+    @pytest.mark.parametrize("scan_outcome", ["error", "422"])
+    def test_streaming_passthrough_on_scan_failure(self, fail_open_container, guardrails_scenario, llm_scenario, scan_outcome):
+        guardrails_scenario.set(scan_outcome)
+        llm_scenario.set("normal", response_type="FLAGGED")
+        resp = chat_request(FLAGGED_TEXT, True)
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
+
+        chunks = collect_sse_chunks(resp)
+        content = assemble_content_from_chunks(chunks)
+        assert content == FLAGGED_TEXT
+
+        finish_reasons = [
+            c["choices"][0]["finish_reason"]
+            for c in chunks
+            if c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["stop"]
+
+    def test_streaming_fail_open_does_not_affect_blocked(self, fail_open_container, guardrails_scenario, llm_scenario):
+        """FAIL_OPEN only applies to scan errors — a 200 blocked response must still block."""
+        guardrails_scenario.set("normal")
+        llm_scenario.set("normal", response_type="FLAGGED")
+        resp = chat_request(FLAGGED_TEXT, True)
+
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers.get("Content-Type", "")
+
+        chunks = collect_sse_chunks(resp)
+        content = assemble_content_from_chunks(chunks)
+
+        assert content == ""
+
+        finish_reasons = [
+            c["choices"][0]["finish_reason"]
+            for c in chunks
+            if c["choices"][0].get("finish_reason")
+        ]
+        assert finish_reasons == ["content_filter"]

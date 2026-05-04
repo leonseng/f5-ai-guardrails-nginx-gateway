@@ -4,97 +4,6 @@
 
 import helpers from './helpers.js';
 
-// ---------------------------------------------------------------------------
-// POST text to F5 AI Guardrails for scanning, applying failOpen to errors.
-// Returns { pass: true } to continue, or { pass: false } when a response has
-// already been sent (blocked or unrecoverable infrastructure error).
-// blockedCode: 'prompt_blocked' | 'response_blocked'
-// Outcome mapping: "flagged" → blocked; "cleared" | "redacted" → pass.
-// ---------------------------------------------------------------------------
-async function scanWithGuardrails(r, text, failOpen, blockedCode) {
-    const debug = process.env.DEBUG === 'true';
-    const scanUrl = `${process.env.F5_AI_GUARDRAILS_API_URL.replace(/\/$/, '')}/scans`;
-
-    const payload = JSON.stringify({
-        input: text,
-        project: process.env.F5_AI_GUARDRAILS_PROJECT_ID,
-        verbose: false
-    });
-
-    if (debug) {
-        r.warn(`[guardrails] scan → POST ${scanUrl} (input: ${text.length} chars)`);
-    }
-
-    const t0 = Date.now();
-    let scanResp;
-    try {
-        scanResp = await ngx.fetch(scanUrl, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${process.env.F5_AI_GUARDRAILS_API_TOKEN}`,
-                'Content-Type': 'application/json'
-            },
-            body: payload
-        });
-    } catch (e) {
-        r.error(`[guardrails] fetch error: ${e}`);
-        if (failOpen) {
-            r.warn(`[guardrails] scan error (fail-open): guardrails_unreachable — passing through`);
-            return { pass: true, redactedContent: null };
-        }
-        helpers.blockResponse(r, 'guardrails_unreachable', 'Guardrails scan error: guardrails_unreachable');
-        return { pass: false, redactedContent: null };
-    }
-
-    if (debug) {
-        r.warn(`[guardrails] scan ← HTTP ${scanResp.status} (${Date.now() - t0}ms)`);
-    }
-
-    if (!scanResp.ok) {
-        const body = await scanResp.text().catch(() => '');
-        r.error(`[guardrails] scan returned HTTP ${scanResp.status}: ${body}`);
-        if (failOpen) {
-            r.warn(`[guardrails] scan error (fail-open): guardrails_api_error — passing through`);
-            return { pass: true, redactedContent: null };
-        }
-        helpers.blockResponse(r, 'guardrails_api_error', 'Guardrails scan error: guardrails_api_error');
-        return { pass: false, redactedContent: null };
-    }
-
-    let result;
-    try {
-        result = await scanResp.json();
-    } catch (e) {
-        r.error(`[guardrails] failed to parse scan response`);
-        if (failOpen) {
-            r.warn(`[guardrails] scan error (fail-open): guardrails_parse_error — passing through`);
-            return { pass: true, redactedContent: null };
-        }
-        helpers.blockResponse(r, 'guardrails_parse_error', 'Guardrails scan error: guardrails_parse_error');
-        return { pass: false, redactedContent: null };
-    }
-
-    const outcome = result && result.result && result.result.outcome;  // "cleared" | "flagged" | "redacted"
-
-    if (debug) {
-        const policy = (result && result.result && result.result.policy) || '';
-        const reason = (result && result.result && result.result.reason) || '';
-        r.warn(`[guardrails] outcome=${outcome}  policy=${policy}  reason=${reason}`);
-    }
-
-    if (outcome === 'flagged') {
-        const label = blockedCode === 'prompt_blocked' ? 'Prompt' : 'Response';
-        helpers.blockResponse(r, blockedCode, `${label} blocked by AI Guardrails: ${outcome}`);
-        return { pass: false, redactedContent: null };
-    }
-
-    if (outcome === 'redacted') {
-        const redactedContent = (result.redactedInput) || null;
-        return { pass: true, redactedContent };
-    }
-
-    return { pass: true, redactedContent: null };
-}
 
 // ---------------------------------------------------------------------------
 // Main handler: js_content for POST /v1/chat/completions.
@@ -114,27 +23,13 @@ async function handleChatCompletions(r) {
     try {
         reqBody = JSON.parse(r.requestText);
     } catch (e) {
-        r.headersOut['Content-Type'] = 'application/json';
-        r.return(400, JSON.stringify({
-            error: {
-                message: 'Invalid JSON request body',
-                type: 'invalid_request_error',
-                code: 'bad_request'
-            }
-        }));
+        helpers.errorResponse(r, 400, 'invalid_request_error', 'Invalid JSON in request body');
         return;
     }
 
     if (scanPrompt) {
         if (!Array.isArray(reqBody.messages) || reqBody.messages.length === 0) {
-            r.headersOut['Content-Type'] = 'application/json';
-            r.return(400, JSON.stringify({
-                error: {
-                    message: 'Request body must contain a non-empty messages array',
-                    type: 'invalid_request_error',
-                    code: 'bad_request'
-                }
-            }));
+            helpers.errorResponse(r, 400, 'invalid_request_error', 'Request body must contain a non-empty messages array');
             return;
         }
 
@@ -142,17 +37,21 @@ async function handleChatCompletions(r) {
         try {
             promptText = helpers.extractRequestScanText(reqBody.messages);
         } catch (e) {
-            if (failOpen) {
-                r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
-            } else {
-                helpers.blockResponse(r, e.code, e.message);
-                return;
-            }
+            helpers.errorResponse(r, 400, e.code, e.message);
+            return;
         }
 
         if (promptText) {
-            const result = await scanWithGuardrails(r, promptText, failOpen, 'prompt_blocked');
-            if (!result.pass) return;
+            const result = await helpers.scanWithGuardrails(r, promptText, failOpen, 'prompt_blocked');
+            if (!result.pass) {
+                if (result.error.code === 'prompt_blocked' || result.error.code === 'response_blocked') {
+                    helpers.contentFilterResponse(r, reqBody.model, reqBody.stream === true);
+                    return;
+                } else {
+                    helpers.errorResponse(r, 400, result.error.code, result.error.message);
+                    return;
+                }
+            }
 
             if (redactPrompt && result.redactedContent !== null) {
                 // Write the redacted text back into the last user/tool message,
@@ -177,35 +76,25 @@ async function handleChatCompletions(r) {
     }
 }
 
-export default { handleChatCompletions };
-
 // ---------------------------------------------------------------------------
 // Non-streaming path: subrequest to upstream, scan JSON response, return to client.
 // ---------------------------------------------------------------------------
 async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
     let upstreamReply;
     try {
-        upstreamReply = await r.subrequest('/app/chat/completions', {
+        upstreamReply = await r.subrequest(helpers.getUpstreamUri(), {
             method: r.method,
             body: JSON.stringify(reqBody)
         });
     } catch (e) {
         r.error(`[guardrails] upstream subrequest error: ${e}`);
-        r.headersOut['Content-Type'] = 'application/json';
-        r.return(502, JSON.stringify({
-            error: {
-                message: 'Upstream LLM request failed',
-                type: 'upstream_error',
-                code: 'bad_gateway'
-            }
-        }));
+        helpers.errorResponse(r, 502, 'upstream_error', 'Upstream LLM request failed');
         return;
     }
 
+    // passthrough non-200 responses from upstream
     if (upstreamReply.status !== 200) {
-        r.headersOut['Content-Type'] =
-            upstreamReply.headersOut['Content-Type'] || 'application/json';
-        r.return(upstreamReply.status, upstreamReply.responseText);
+        helpers.passUpstreamResponse(r, upstreamReply);
         return;
     }
 
@@ -215,9 +104,7 @@ async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, red
             respBody = JSON.parse(upstreamReply.responseText);
         } catch (e) {
             r.warn('[guardrails] upstream response is not JSON, skipping response scan');
-            r.headersOut['Content-Type'] =
-                upstreamReply.headersOut['Content-Type'] || 'application/json';
-            r.return(200, upstreamReply.responseText);
+            helpers.errorResponse(r, 400, 'invalid_response_error', 'Response scanning requires a JSON response body.');
             return;
         }
 
@@ -228,14 +115,17 @@ async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, red
             if (failOpen) {
                 r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
             } else {
-                helpers.blockResponse(r, e.code, e.message);
+                helpers.errorResponse(r, 400, e.code, e.message);
                 return;
             }
         }
 
         if (responseText) {
-            const result = await scanWithGuardrails(r, responseText, failOpen, 'response_blocked');
-            if (!result.pass) return;
+            const result = await helpers.scanWithGuardrails(r, responseText, failOpen, 'response_blocked');
+            if (!result.pass) {
+                helpers.contentFilterResponse(r, reqBody.model);
+                return;
+            }
 
             if (redactResponse && result.redactedContent !== null) {
                 // Write the redacted text back into the last assistant choice,
@@ -249,16 +139,13 @@ async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, red
                     r.warn('[guardrails] response redacted — returning modified body to client');
                 }
 
-                r.headersOut['Content-Type'] = 'application/json';
-                r.return(200, JSON.stringify(respBody));
+                helpers.passUpstreamResponse(r, upstreamReply, JSON.stringify(respBody));
                 return;
             }
         }
     }
 
-    r.headersOut['Content-Type'] =
-        upstreamReply.headersOut['Content-Type'] || 'application/json';
-    r.return(200, upstreamReply.responseText);
+    helpers.passUpstreamResponse(r, upstreamReply);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,18 +154,18 @@ async function handleNonStreamingRequest(r, reqBody, scanResponse, failOpen, red
 async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redactResponse) {
     let upstreamReply;
     try {
-        upstreamReply = await r.subrequest('/app/chat/completions', {
+        upstreamReply = await r.subrequest(helpers.getUpstreamUri(), {
             method: r.method,
             body: JSON.stringify(reqBody)
         });
     } catch (e) {
         r.error(`[guardrails] upstream subrequest error: ${e}`);
-        helpers.sendStreamError(r, 'bad_gateway', 'Upstream LLM request failed');
+        helpers.sendStreamEevent(r, { error: { code: 'upstream_error', message: 'Upstream LLM request failed' } });
         return;
     }
 
     if (upstreamReply.status !== 200) {
-        helpers.sendStreamError(r, 'bad_gateway', `Upstream LLM error: ${upstreamReply.status}`);
+        helpers.sendStreamEevent(r, { error: { code: 'bad_gateway', message: `Upstream LLM error: ${upstreamReply.status}` } });
         return;
     }
 
@@ -289,36 +176,33 @@ async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redact
         try {
             scanText = helpers.extractSSEContent(rawSSE);
         } catch (e) {
-            if (e.code === 'tool_call_not_supported') {
-                r.warn(`[guardrails] ${e.message} — skipping response scan`);
-                helpers.replaySSE(r, rawSSE);
+            helpers.errorResponse(r, 400, e.code, e.message);
+            return;
+        }
+
+        if (scanText) {
+            const result = await helpers.scanWithGuardrails(r, scanText, failOpen, 'response_blocked');
+            if (!result.pass) {
+                if (result.error.code === 'response_blocked') {
+                    helpers.contentFilterResponse(r, reqBody.model, true);
+                } else {
+                    helpers.sendStreamEvent(r, { error: result.error });
+                }
                 return;
             }
-            // no_scannable_content
-            if (failOpen) {
-                r.warn(`[guardrails] ${e.message} (fail-open) — passing through`);
-                helpers.replaySSE(r, rawSSE);
-            } else {
-                helpers.blockResponse(r, e.code, e.message);
-            }
-            return;
-        }
 
-        const result = await scanWithGuardrails(r, scanText, failOpen, 'response_blocked');
-        if (!result.pass) {
-            helpers.sendStreamContentFilter(r);
-            return;
-        }
-
-        if (redactResponse && result.redactedContent !== null) {
-            if (process.env.DEBUG === 'true') {
-                r.warn('[guardrails] response redacted — returning modified SSE to client');
+            if (redactResponse && result.redactedContent !== null) {
+                if (process.env.DEBUG === 'true') {
+                    r.warn('[guardrails] response redacted — returning modified SSE to client');
+                }
+                const rebuiltSSE = helpers.rebuildSSEWithRedactedContent(rawSSE, result.redactedContent);
+                helpers.replaySSE(r, rebuiltSSE);
+                return;
             }
-            const rebuiltSSE = helpers.rebuildSSEWithRedactedContent(rawSSE, result.redactedContent);
-            helpers.replaySSE(r, rebuiltSSE);
-            return;
         }
     }
 
     helpers.replaySSE(r, rawSSE);
 }
+
+export default { handleChatCompletions };
