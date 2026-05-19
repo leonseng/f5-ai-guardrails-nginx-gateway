@@ -160,12 +160,12 @@ async function handleStreamingRequest(r, reqBody, scanResponse, failOpen, redact
         });
     } catch (e) {
         r.error(`[guardrails] upstream subrequest error: ${e}`);
-        helpers.sendStreamEevent(r, { error: { code: 'upstream_error', message: 'Upstream LLM request failed' } });
+        helpers.sendStreamEvent(r, { error: { code: 'upstream_error', message: 'Upstream LLM request failed' } });
         return;
     }
 
     if (upstreamReply.status !== 200) {
-        helpers.sendStreamEevent(r, { error: { code: 'bad_gateway', message: `Upstream LLM error: ${upstreamReply.status}` } });
+        helpers.sendStreamEvent(r, { error: { code: 'bad_gateway', message: `Upstream LLM error: ${upstreamReply.status}` } });
         return;
     }
 
